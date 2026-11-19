@@ -4,7 +4,7 @@
 //   「同じ画像ならPC版と同じ特徴量が出る」ことを目標に、数値はすべてPC版のまま。
 //   前半 = DOMを使わない計算（Node でもテストできる）、後半 = カメラと MediaPipe を動かす VisionEngine。
 // ==========================================
-import { rfPredictProba } from './rf.js';
+import { predictProba } from "./model.js";
 
 export const FEAT_KEYS = ["up", "down", "left", "right", "front",
   "lip_ratio", "mouth_aspect", "rel_cx", "rel_cy",
@@ -708,7 +708,7 @@ export class VisionEngine {
 
   // 学習モデルで確率 → 直近6フレームの平均 → パワー → DirStabilizer
   _predict(feat, raw) {
-    const p = rfPredictProba(this.model, feat);
+    const p = predictProba(this.model, feat);
     const rawProbs = {};
     this.model.classes.forEach((cls, i) => { rawProbs[cls] = p[i]; });
     this.probHistory.push(p);

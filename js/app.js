@@ -5,12 +5,13 @@
 import { W, H, COL, FS, Screen, loadImages, rgb } from "./ui.js";
 import { VisionEngine, DIRS, FEAT_KEYS, MP_VERSION } from "./vision.js";
 import { MockEngine } from "./mock.js";
-import { deserializeModel } from "./rf.js";
+import { deserializeModel } from "./model.js";
 import { dbGet, dbSet, requestPersist } from "./storage.js";
 import { AudioEngine } from "./audio.js";
 
-export const APP_VERSION = "1.0.0";
-const MODEL_VERSION = "html1-feat21";   // 特徴量を変えたら上げる（古いモデルは読まずに測り直しへ）
+export const APP_VERSION = "1.1.0";
+const MODEL_VERSION = "html2-rfsvm";     // 学習方法を変えたら上げる（保存してある特徴量から自動で学習し直す）
+const FEAT_VERSIONS = ["feat21-v1", "html1-feat21"];   // 特徴量の版（変えたら先頭に足す。古い特徴量は読まずに測り直しへ）
 const MOCK = new URLSearchParams(location.search).has("mock");
 
 // ---------- PC版と同じ定数 ----------
@@ -206,7 +207,12 @@ class App {
     await dbSet("lastUser", id);
     this.afterLogin();
   }
-  afterLogin() {
+  async afterLogin() {
+    if (this.needRetrain) {
+      this.needRetrain = false;
+      this.setScene("TRAINING"); this.trainMsg = "新しい判定方法（RF＋SVM）で学習し直しています"; this.trainProgress = 0;
+      await this.trainAndSave();
+    }
     if (this.model) this.setScene("HOME");
     else { this.firstFlow = true; this.placementMode = "first"; this.setScene("PLACEMENT"); }
   }
@@ -222,8 +228,11 @@ class App {
     if (m && m.version === MODEL_VERSION && m.model) { this.model = deserializeModel(m.model); this.modelMeta = m; }
     else { this.model = null; this.modelMeta = null; }
     const cd = await dbGet("calibdata:" + id);
-    this.calibDataset = (cd && cd.version === MODEL_VERSION) ? cd.dataset : {};
-    this.calibRoundData = (cd && cd.version === MODEL_VERSION) ? (cd.roundData || {}) : {};
+    const cdOk = !!(cd && FEAT_VERSIONS.includes(cd.version));
+    this.calibDataset = cdOk ? cd.dataset : {};
+    this.calibRoundData = cdOk ? (cd.roundData || {}) : {};
+    // 学習方法だけが古いモデル：保存してある特徴量があれば、測り直さずに学習し直す
+    this.needRetrain = !this.model && cdOk && Object.keys(this.calibDataset).length >= 2;
     this.daily = (await dbGet("daily:" + id)) || {};
     this.plays = (await dbGet("plays:" + id)) || [];
     this.calibLog = (await dbGet("caliblog:" + id)) || [];
@@ -601,7 +610,7 @@ class App {
         const rf = await import("./rf.js");
         await new Promise((r) => setTimeout(r, 50));
         const t0 = performance.now();
-        if (msg.type === "train") { const m = mod.trainFromDataset(msg.dataset, msg.opts || {}); return { model: m ? rf.serializeModel(m) : null, ms: performance.now() - t0 }; }
+        if (msg.type === "train") { const md = await import("./model.js"); const m = mod.trainFromDataset(msg.dataset); return { model: m ? md.serializeModel(m) : null, ms: performance.now() - t0 }; }
         return { result: rf.diagnoseCalibration(msg.roundData) };
       };
       go().catch(reject);
@@ -613,11 +622,11 @@ class App {
       const r = await this.runWorker({ type: "train", dataset: this.calibDataset });
       if (!r.model) return false;
       this.model = deserializeModel(r.model);
-      this.modelMeta = { version: MODEL_VERSION, savedAt: jst(), trainMs: Math.round(r.ms), nSamples: r.model.nSamples, nTrees: r.model.trees.length };
+      this.modelMeta = { version: MODEL_VERSION, savedAt: jst(), trainMs: Math.round(r.ms), nSamples: r.model.nSamples, nTrees: r.model.rf.trees.length, nSV: r.model.svm.nSV, rfMs: r.model.rfMs, svmMs: r.model.svmMs };
       await dbSet("model:" + this.user.id, { ...this.modelMeta, model: r.model });
-      await dbSet("calibdata:" + this.user.id, { version: MODEL_VERSION, at: jst(), dataset: this.calibDataset, roundData: this.calibRoundData });
+      await dbSet("calibdata:" + this.user.id, { version: FEAT_VERSIONS[0], at: jst(), dataset: this.calibDataset, roundData: this.calibRoundData });
       this.engine.model = this.model; this.engine.probHistory = [];
-      console.log(`[学習] ${r.model.nSamples}件 ${Math.round(r.ms)}ms`);
+      console.log(`[学習] ${r.model.nSamples}件 ${Math.round(r.ms)}ms（RF ${r.model.rfMs}ms / SVM ${r.model.svmMs}ms、SV ${r.model.svm.nSV}）`);
       return true;
     } catch (e) { console.error(e); return false; }
   }
@@ -1437,7 +1446,7 @@ class App {
       lb.forEach((l, j) => s.text(l.slice(0, 5), 80 + j * 44, 304, 12, "#AAA"));
       this.diag.matrix.forEach((row, i) => { s.text(lb[i], 16, 320 + i * 15, 12, "#AAA"); row.forEach((v, j) => s.text(String(v), 80 + j * 44, 320 + i * 15, 12, i === j ? COL.green : v ? COL.red : "#666")); });
     } else s.text("混同行列：まだ測定していません", 16, 286, 13, "#888");
-    if (this.modelMeta) s.text(`モデル: ${this.modelMeta.savedAt}  ${this.modelMeta.nSamples}件  ${this.modelMeta.nTrees}本  学習 ${this.modelMeta.trainMs}ms`, 16, 412, 12, "#AAA", "left", 560);
+    if (this.modelMeta) s.text(`モデル(RF:SVM=2:1): ${this.modelMeta.savedAt}  ${this.modelMeta.nSamples}件  木${this.modelMeta.nTrees}本  SV${this.modelMeta.nSV ?? "-"}個  学習 ${this.modelMeta.trainMs}ms（RF ${this.modelMeta.rfMs ?? "-"} / SVM ${this.modelMeta.svmMs ?? "-"}）`, 16, 412, 12, "#AAA", "left", 620);
     s.text(navigator.userAgent, 130, 455, 11, "#666", "left", 520);
     // マスク
     e.drawMask(s.ctx, 560, 62, 224, 168);

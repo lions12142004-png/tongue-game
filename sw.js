@@ -1,9 +1,9 @@
 // オフラインでも遊べるように、素材とモデルをキャッシュする
 //   ファイルを更新したら VERSION を上げる（古いキャッシュは自動で消える）
-const VERSION = "tongue-game-1.0.0";
+const VERSION = "tongue-game-1.1.0";
 const CORE = [
   "./", "index.html", "css/style.css", "manifest.webmanifest",
-  "js/app.js", "js/ui.js", "js/vision.js", "js/rf.js", "js/train-worker.js", "js/storage.js", "js/audio.js", "js/mock.js",
+  "js/app.js", "js/ui.js", "js/vision.js", "js/rf.js", "js/svm.js", "js/model.js", "js/train-worker.js", "js/storage.js", "js/audio.js", "js/mock.js",
   "assets/beatmaps/track6.json", "assets/beatmaps/track_tyuto.json",
   "assets/audio/elise2.m4a", "assets/audio/my_track.mp3",
   "assets/img/up2.png", "assets/img/down2.png", "assets/img/left2.png", "assets/img/right2.png", "assets/img/front2.png",
