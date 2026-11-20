@@ -27,6 +27,7 @@ export class Sync {
     this.today = null; this.history = null; this.ranking = null;
     this.online = null; this.lastError = "";
     this.flushing = false; this.lastFlush = 0;
+    this.busy = false;   // true の間（プレイ中・測定中）は通信しない
     this.lastTodayReq = 0; this.lastRankReq = 0; this.lastHistReq = 0;
     if (this.enabled) {
       setInterval(() => this.tick(), 30000);
@@ -116,8 +117,13 @@ export class Sync {
     } finally { clearTimeout(t); }
   }
 
+  setBusy(on) {
+    if (this.busy === on) return;
+    this.busy = on;
+    if (!on) { this.flush(); this.refresh(true); }   // 終わったら、ためていた分をまとめて送る
+  }
   async flush() {
-    if (!this.enabled || this.flushing || !this.queue.length || !this.uid) return;
+    if (!this.enabled || this.busy || this.flushing || !this.queue.length || !this.uid) return;
     this.flushing = true; this.lastFlush = Date.now();
     try {
       const batch = this.queue.slice(0, 50);
@@ -137,7 +143,7 @@ export class Sync {
   }
 
   async fetchToday() {
-    if (!this.enabled || !this.uid) return;
+    if (!this.enabled || this.busy || !this.uid) return;
     const uid = this.uid, date = this.todayStr(), started = Date.now();
     try {
       const r = await this.req("GET", { action: "today", key: this.key, user_id: uid, date });
@@ -145,7 +151,7 @@ export class Sync {
     } catch {}
   }
   async fetchHistory() {
-    if (!this.enabled || !this.uid) return;
+    if (!this.enabled || this.busy || !this.uid) return;
     const uid = this.uid;
     try {
       const r = await this.req("GET", { action: "history", key: this.key, user_id: uid });
@@ -153,7 +159,7 @@ export class Sync {
     } catch {}
   }
   async fetchRanking() {
-    if (!this.enabled) return;
+    if (!this.enabled || this.busy) return;
     try {
       const r = await this.req("GET", { action: "ranking", key: this.key });
       if (r.ok) { this.ranking = r; dbSet("rankingcache", r).catch(() => {}); }
@@ -161,7 +167,7 @@ export class Sync {
   }
   // 何度呼んでもよい（20秒に1回まで）
   refresh(force = false) {
-    if (!this.enabled) return;
+    if (!this.enabled || this.busy) return;
     const now = Date.now();
     if (force || now - this.lastTodayReq > 20000) { this.lastTodayReq = now; this.fetchToday(); }
     if (force || now - this.lastRankReq > 20000) { this.lastRankReq = now; this.fetchRanking(); }
