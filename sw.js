@@ -1,9 +1,9 @@
 // オフラインでも遊べるように、素材とモデルをキャッシュする
 //   ファイルを更新したら VERSION を上げる（古いキャッシュは自動で消える）
-const VERSION = "tongue-game-1.1.0";
+const VERSION = "tongue-game-1.3.0";
 const CORE = [
   "./", "index.html", "css/style.css", "manifest.webmanifest",
-  "js/app.js", "js/ui.js", "js/vision.js", "js/rf.js", "js/svm.js", "js/model.js", "js/train-worker.js", "js/storage.js", "js/audio.js", "js/mock.js",
+  "js/app.js", "js/ui.js", "js/vision.js", "js/rf.js", "js/svm.js", "js/model.js", "js/sync.js", "js/config.js", "js/train-worker.js", "js/storage.js", "js/audio.js", "js/mock.js",
   "assets/beatmaps/track6.json", "assets/beatmaps/track_tyuto.json",
   "assets/audio/elise2.m4a", "assets/audio/my_track.mp3",
   "assets/img/up2.png", "assets/img/down2.png", "assets/img/left2.png", "assets/img/right2.png", "assets/img/front2.png",
@@ -24,6 +24,8 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   const sameOrigin = url.origin === location.origin;
+  // 記録の送受信（Apps Script など）はキャッシュしない。キャッシュするのは自分のサイトと、版を固定した MediaPipe だけ
+  if (!sameOrigin && !/(^|\.)cdn\.jsdelivr\.net$|(^|\.)storage\.googleapis\.com$/.test(url.hostname)) return;
   // HTML・JS・JSON は「通信できればネット、だめならキャッシュ」（更新がすぐ反映される）
   const fresh = sameOrigin && (req.mode === "navigate" || /\.(html|js|css|json|webmanifest)$/.test(url.pathname) || url.pathname.endsWith("/"));
   if (fresh) {

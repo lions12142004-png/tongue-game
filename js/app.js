@@ -8,8 +8,10 @@ import { MockEngine } from "./mock.js";
 import { deserializeModel } from "./model.js";
 import { dbGet, dbSet, requestPersist } from "./storage.js";
 import { AudioEngine } from "./audio.js";
+import { Sync } from "./sync.js";
+import { SYNC } from "./config.js";
 
-export const APP_VERSION = "1.1.0";
+export const APP_VERSION = "1.3.0";
 const MODEL_VERSION = "html2-rfsvm";     // 学習方法を変えたら上げる（保存してある特徴量から自動で学習し直す）
 const FEAT_VERSIONS = ["feat21-v1", "html1-feat21"];   // 特徴量の版（変えたら先頭に足す。古い特徴量は読まずに測り直しへ）
 const MOCK = new URLSearchParams(location.search).has("mock");
@@ -36,7 +38,11 @@ const CALIB_STEPS = [
   { key: "up", name: "上", desc: "舌を【上】に限界まで突き出した状態で記録してください", min_val: 2 },
 ];
 const INT_KEYS = new Set(["up", "down", "left", "right", "front"]);
-const SONG_MAIN = { title: "エリーゼのために", diff: "NORMAL", audio: "assets/audio/elise2.m4a", beatmap: "assets/beatmaps/track6.json", end_time: 120000 };
+// 曲（PC版の SONGS の最初の3曲と同じ名前。名前が同じなら、PC とスマホで同じランキングになる）
+const SONGS = ["エリーゼのために", "仮の曲2", "仮の曲3"].map((title) => ({ title, audio: "assets/audio/elise2.m4a", beatmap: "assets/beatmaps/track6.json", end_time: 120000 }));
+const DIFFS = ["EASY", "NORMAL", "HARD"];
+const DIFF_ENABLED = { EASY: false, NORMAL: true, HARD: false };   // PC版と同じく NORMAL のみ
+const DIFF_COL = { EASY: "#2ECC71", NORMAL: "#4ECDC4", HARD: "#E74C3C" };
 const SONG_TUTORIAL = { title: "くるみ割り人形", diff: "NORMAL", audio: "assets/audio/my_track.mp3", beatmap: "assets/beatmaps/track_tyuto.json", end_time: 40000 };
 const DIR_JA = { up: "上", down: "下", left: "左", right: "右", front: "前" };
 const NORMA_ORDER = ["up", "down", "left", "right", "front"];
@@ -96,6 +102,11 @@ class App {
     this.ruleReturn = "PAUSE";
     this.placementMode = "first";
     this.firstFlow = false;
+    this.selSong = 0; this.rankView = false;
+    // 記録の送受信（config.js が空なら通信しない）。動作確認モードでは URL で試験用サーバーを指定できる
+    const qp = new URLSearchParams(location.search);
+    const syncCfg = (MOCK && qp.get("sync")) ? { url: qp.get("sync"), key: qp.get("key") || "" } : SYNC;
+    this.sync = new Sync(syncCfg, "phone", APP_VERSION, () => localDate(), () => jst());
     this.setupInput();
     this.setupIdForm();
     document.addEventListener("visibilitychange", () => this.onVisibility());
@@ -208,6 +219,7 @@ class App {
     this.afterLogin();
   }
   async afterLogin() {
+    if (this.user) await this.sync.setUser(this.user.id);
     if (this.needRetrain) {
       this.needRetrain = false;
       this.setScene("TRAINING"); this.trainMsg = "新しい判定方法（RF＋SVM）で学習し直しています"; this.trainProgress = 0;
@@ -290,6 +302,7 @@ class App {
   onVisibility() {
     if (document.visibilityState === "hidden") { this.interrupt(); }
     else {
+      this.sync.flush(); this.sync.refresh(true);
       if (this.engine.ready && !this.engine.cameraAlive()) this.engine.startCamera().catch(() => {});
       this.updateWakeLock();
     }
@@ -446,8 +459,8 @@ class App {
       s.button(px + 100, 408, 180, 58, "次へ", () => this.setScene("CALIB_INTRO"), { bg: COL.green });
       if (this.model) s.button(px - 10, 408, 100, 58, "戻る", () => this.setScene("HOME"), { bg: rgb(80, 80, 80), fg: COL.white });
     } else {
-      s.button(px + 100, 408, 180, 58, "スタート", () => this.startSong(SONG_MAIN, false), { bg: COL.green });
-      s.button(px - 10, 408, 100, 58, "戻る", () => this.setScene("HOME"), { bg: rgb(80, 80, 80), fg: COL.white });
+      s.button(px + 100, 408, 180, 58, "スタート", () => this.startSong({ ...SONGS[this.selSong], diff: "NORMAL" }, false), { bg: COL.green });
+      s.button(px - 10, 408, 100, 58, "戻る", () => this.setScene("SONG_SELECT"), { bg: rgb(80, 80, 80), fg: COL.white });
     }
   }
 
@@ -548,15 +561,8 @@ class App {
     const label = k.startsWith("face") ? "face" : k;   // face_open も「舌なし」として学習
     (this.calibDatasetNew[label] ||= []).push(...this.pendingFeats);
     (this.calibRoundNew[`${label}|${this.calibRound}`] ||= []).push(...this.pendingFeats);
+    // PC版 1119_2：基準値は1回目（正面・普通）だけで決める。2・3回目は学習データにだけ使う
     if (this.calibRound === 1) this.tempCalib[k] = { ...profile };
-    else {
-      for (const kp of Object.keys(this.tempCalib[k])) {
-        if (kp in profile) {
-          const v1 = this.tempCalib[k][kp], v2 = profile[kp];
-          this.tempCalib[k][kp] = INT_KEYS.has(kp) ? Math.trunc((v1 + v2) / 2) : round4((v1 + v2) / 2.0);
-        }
-      }
-    }
     if (k === "face" && this.calibRound === CALIB_PLAN.length) { this.userCalib.face = { ...this.tempCalib.face }; this.engine.userCalib = this.userCalib; }
     if (this.calibRound < CALIB_PLAN.length) { this.calibRound++; this.cancelRecording(); this.setScene("CALIBRATION"); return; }
     this.calibRound = 1; this.calibIdx++;
@@ -576,7 +582,7 @@ class App {
       if (this.diag) console.log("[診断] 行=正解 / 列=予測", this.diag.labels, this.diag.matrix);
     } catch (e) { console.warn(e); }
     const ok = await this.trainAndSave();
-    this.calibLog.push({ at: jst(), kind: "calibration", test_correct: "", missed_dirs: "", model_version: this.modelVersionStr() });
+    this.logCalib({ at: jst(), kind: "calibration", test_correct: "", missed_dirs: "", model_version: this.modelVersionStr() });
     await dbSet("caliblog:" + this.user.id, this.calibLog);
     if (!ok) { this.popup("学習に失敗しました。もう一度測定してください", 4000, COL.red); this.setScene("HOME"); return; }
     this.tutorialData = { up: [], down: [], left: [], right: [], front: [] };
@@ -740,6 +746,7 @@ class App {
     const s = this.scr, step = CALIB_STEPS[this.calibIdx];
     s.textC(`【${step.name}】 の確認 (${this.calibRound}/${CALIB_PLAN.length}回目)`, 60, FS.lg, COL.teal);
     s.textC(this.calibRound < CALIB_PLAN.length ? `この状態で記録して、${this.calibRound + 1}回目を測定しますか？` : "この状態で記録して、次の方向へ進みますか？", 120, FS.md, COL.white);
+    s.textC(this.calibRound === 1 ? "※1回目の値が、この方向の基準値になります" : "※2・3回目は判定の学習にだけ使います（基準値は1回目のまま）", 150, 15, "#AAA");
     const p = this.pendingCalib || {};
     if (step.key.startsWith("face")) s.textC(`正面・舌なし基準データを ${this.pendingFeats.length} フレーム記録しました`, 180, FS.sm, COL.white);
     else s.textC(`取得値: [ 下:${p.down} 左:${p.left} 右:${p.right} 前:${p.front} ] (${this.pendingFeats.length}フレーム)`, 180, FS.sm, COL.white);
@@ -809,7 +816,7 @@ class App {
     d.plays++;
     this.play = {
       user_id: this.user.id, play_id: `${today.replace(/-/g, "")}-${String(this.plays.length + 1).padStart(3, "0")}`,
-      started_at: jst(), ended_at: "", completed: 0, song: this.song.title, score: 0,
+      started_at: jst(), ended_at: "", completed: 0, song: this.song.title, difficulty: this.song.diff || "NORMAL", device: "phone", score: 0,
       excellent: 0, nice: 0, perfect: 0, miss: 0, max_count: 0,
       norma_up: 0, norma_down: 0, norma_left: 0, norma_right: 0, norma_front: 0,
       hold_sec_up: 0, hold_sec_down: 0, hold_sec_left: 0, hold_sec_right: 0, hold_sec_front: 0,
@@ -832,9 +839,19 @@ class App {
     p.avg_fps = +(p._frames / sec).toFixed(1);
     for (const d of NORMA_ORDER) p["hold_sec_" + d] = +p["hold_sec_" + d].toFixed(2);
     if (completed) this.todayRec().completed_plays++;
+    const row = {}; for (const [k, v] of Object.entries(p)) if (!k.startsWith("_")) row[k] = v;
+    this.sync.addPlay(row);   // 記録を送る（通信できなければ、あとで送り直す）
     this.play = null;
     this.saveLogs();
   }
+  logCalib(r) {
+    this.calibLog.push(r);
+    dbSet("caliblog:" + this.user.id, this.calibLog).catch(() => {});
+    this.sync.addCalib({ user_id: this.user.id, ...r });
+  }
+  // 今日のノルマ（PC とスマホの合計）
+  todayCounts() { return this.sync.combinedToday(this.daily[localDate()] || {}); }
+  todayCleared() { return this.sync.isCleared(this.todayCounts()); }
   todayRec() {
     const today = localDate();
     if (!this.daily[today]) this.daily[today] = { up: 0, down: 0, left: 0, right: 0, front: 0, cleared: 0, cleared_at: "", plays: 0, completed_plays: 0 };
@@ -847,12 +864,14 @@ class App {
     dbSet("plays:" + this.user.id, plays).catch(() => {});
   }
   addNorma(k) {
+    const wasCleared = this.todayCleared();
     const d = this.todayRec();
-    d[k] = (d[k] || 0) + 1;
+    d[k] = (d[k] || 0) + 1;              // この端末で数えた回数（CSV 用）
+    this.sync.addNorma(k, localDate());   // PC との合計のために送る
     this.normaThisPlay[k]++;
     if (this.play) this.play["norma_" + k]++;
     this.popup(`${DIR_JA[k]} +1`, 1200, COL.yellow, FS.md, 92);
-    if (!d.cleared && NORMA_ORDER.every((x) => d[x] >= NORMA_GOAL)) {
+    if (!wasCleared && !d.cleared && this.todayCleared()) {
       d.cleared = 1; d.cleared_at = jst(); this.justCleared = true;
       this.popup("今日のトレーニング クリア！", 2500, COL.yellow, FS.lg, 200);
     }
@@ -902,7 +921,7 @@ class App {
   drawGame(countdown) {
     const s = this.scr, e = this.engine, st = e.state;
     const elapsed = this.audio.elapsedMs();
-    const dt = Math.max(0, Math.min(100, elapsed - this.lastElapsed));
+    const dt = Math.max(0, Math.min(250, elapsed - this.lastElapsed));   // PC版 1119_2 と同じく 250ms まで
     this.lastElapsed = elapsed;
     const now = performance.now();
     if (this.play && !countdown && this._lastNow) this.play._activeMs += Math.min(100, now - this._lastNow);
@@ -1118,14 +1137,85 @@ class App {
   }
 
   updateRecord(score) {
-    const key = `${SONG_MAIN.title}____${SONG_MAIN.diff}`;
+    const key = `${this.song.title}____${this.song.diff}`;
     this.user.scores ||= {};
     const rec = this.user.scores[key] || { high: 0, last: 0 };
     this.prevScore = rec.last; this.isNewRecord = score > rec.high;
     this.user.scores[key] = { high: Math.max(rec.high, score), last: score };
     this.saveUser();
   }
-  getRecord() { return (this.user && this.user.scores && this.user.scores[`${SONG_MAIN.title}____${SONG_MAIN.diff}`]) || { high: 0, last: 0 }; }
+  getRecord(title = this.song && this.song.title, diff = (this.song && this.song.diff) || "NORMAL") {
+    return (this.user && this.user.scores && this.user.scores[`${title}____${diff}`]) || { high: 0, last: 0 };
+  }
+
+  // =====================================================
+  // 曲選択（左：曲、右：コース（難易度）／みんなのランキング）
+  // =====================================================
+  draw_SONG_SELECT() {
+    const s = this.scr;
+    this.sync.refresh();
+    s.text(`PLAYER: ${this.user ? this.user.id : ""}`, 20, 10, FS.sm, COL.yellow);
+    s.textC("曲を選ぶ", 8, FS.lg, COL.teal, 300);
+    const st = this.sync.statusText();
+    if (st) s.text(st, W - 20, 12, 14, rgb(232, 176, 192), "right");
+    // 曲
+    SONGS.forEach((song, i) => {
+      const y = 56 + i * 82, sel = i === this.selSong;
+      s.rrect(20, y, 250, 72, 10, sel ? "rgba(78,205,196,0.16)" : "#1C1C26", sel ? COL.teal : "#555", sel ? 3 : 1);
+      s.text(song.title, 34, y + 10, FS.md, COL.white, "left", 222);
+      const best = Math.max(...DIFFS.map((d) => this.getRecord(song.title, d).high));
+      s.text(`HIGH: ${best.toLocaleString()}`, 34, y + 42, 15, "#AAA");
+      s.hotspot(20, y, 250, 72, () => { this.selSong = i; });
+    });
+    s.text("曲の中身はどれも同じ譜面です", 24, 306, 14, "#777");
+    // 右：選んだ曲
+    const song = SONGS[this.selSong];
+    const px = 290, pw = 490;
+    s.rrect(px, 50, pw, 352, 12, "#16161E", "#444", 1);
+    s.text(song.title, px + 18, 66, FS.md, COL.white, "left", pw - 250);
+    // タブ：コース／みんなのランキング
+    const tab = (x, label, on, fn) => {
+      s.rrect(x, 62, 98, 34, 8, on ? COL.teal : "#2A2A36", on ? null : "#555", 1);
+      s.text(label, x + 49, 70, 15, on ? COL.bg : "#CCC", "center", 90);
+      s.hotspot(x, 58, 98, 42, fn);
+    };
+    tab(px + pw - 214, "コース", !this.rankView, () => { this.rankView = false; });
+    tab(px + pw - 110, "ランキング", this.rankView, () => { this.rankView = true; this.sync.refresh(true); });
+    s.line(px + 14, 106, px + pw - 14, 106, "#444", 1);
+    DIFFS.forEach((d, j) => {
+      const ry = 114 + j * 94, en = DIFF_ENABLED[d];
+      if (j) s.line(px + 14, ry - 6, px + pw - 14, ry - 6, "#333", 1);
+      s.text(d, px + 18, ry + 6, FS.md, en || this.rankView ? DIFF_COL[d] : "#555");
+      if (!this.rankView) {
+        const rec = this.getRecord(song.title, d);
+        if (en) {
+          s.text(`HIGH: ${rec.high.toLocaleString()}`, px + 150, ry + 8, FS.md - 2, COL.white);
+          s.text(`前回: ${rec.last.toLocaleString()}`, px + 150, ry + 40, 15, "#AAA");
+          s.button(px + pw - 150, ry + 10, 132, 56, "これで遊ぶ", () => { this.placementMode = "play"; this.setScene("PLACEMENT"); }, { bg: COL.green, size: FS.sm + 2 });
+        } else s.text("準備中", px + 150, ry + 14, FS.md, "#555");
+      } else {
+        const top = this.sync.top3(song.title, d);
+        let msg = "";
+        if (!this.sync.enabled) msg = "通信の設定がありません";
+        else if (top === null) msg = this.sync.online === false ? "ランキングを読み込めませんでした" : "読み込み中…";
+        else if (!top.length) msg = "まだ記録がありません";
+        if (msg) s.text(msg, px + 150, ry + 22, 15, "#888");
+        else for (let k = 0; k < 3; k++) {
+          const yy = ry + 2 + k * 26, e = top[k];
+          if (!e) { s.text(`${k + 1}位  —`, px + 150, yy, 16, "#555"); continue; }
+          const me = this.user && e.name === this.user.id;
+          s.text(`${e.rank}位  ${e.name}`, px + 150, yy, 16, me ? COL.yellow : COL.white, "left", 190);
+          s.text(Number(e.score).toLocaleString(), px + pw - 24, yy, 16, me ? COL.yellow : COL.white, "right");
+        }
+      }
+    });
+    if (this.rankView) {
+      const t = this.sync.rankingTime();
+      if (t) s.text(`${t.slice(5, 16).replace("-", "/")} 時点${this.sync.online === false ? "（オフライン）" : ""}`, px + pw - 18, 384, 13, "#888", "right");
+      s.text("曲・難易度ごとのトップ3（参加者IDと得点）", px + 18, 384, 13, "#888");
+    }
+    s.button(130, 420, 160, 50, "ホームへ", () => this.setScene("HOME"), { bg: rgb(80, 80, 80), fg: COL.white, size: FS.sm + 2 });
+  }
 
   // =====================================================
   // 一時停止
@@ -1252,7 +1342,7 @@ class App {
   }
   finishTest() {
     this.testState = "FINISH";
-    this.calibLog.push({ at: jst(), kind: "test", test_correct: this.testCorrect, missed_dirs: this.testMissed.join("・"), model_version: this.modelVersionStr() });
+    this.logCalib({ at: jst(), kind: "test", test_correct: this.testCorrect, missed_dirs: this.testMissed.join("・"), model_version: this.modelVersionStr() });
     dbSet("caliblog:" + this.user.id, this.calibLog).catch(() => {});
   }
 
@@ -1260,7 +1350,7 @@ class App {
   // ホーム
   // =====================================================
   normaChips(y, chipH = 58, small = false) {
-    const s = this.scr, d = this.daily[localDate()] || {};
+    const s = this.scr, d = this.todayCounts();
     NORMA_ORDER.forEach((k, i) => {
       const v = d[k] || 0, done = v >= NORMA_GOAL;
       const x = 36 + i * 148, w = 136;
@@ -1275,19 +1365,20 @@ class App {
     s.text(`PLAYER: ${this.user ? this.user.id : ""}`, 20, 10, FS.sm, COL.yellow);
     s.hotspot(10, 0, 220, 34, () => this.titleTap("HOME"));
     if (this.user && this.user.calibAt) s.text(`測定: じっくりコース（${this.user.calibAt.slice(5, 10).replace("-", "/")}）`, W - 20, 10, FS.sm, rgb(110, 110, 110), "right");
-    // 今日のノルマ
-    const d = this.daily[localDate()] || {};
+    this.sync.refresh();
+    const st = this.sync.statusText();
+    if (st) s.text(st, W / 2, 12, 14, rgb(232, 176, 192), "center");
+    // 今日のノルマ（PC とスマホの合計）
     s.rrect(20, 36, 760, 134, 10, "#16161E", COL.teal, 2);
     s.text("今日のノルマ", 36, 46, FS.md, COL.white);
-    if (d.cleared) s.text("今日のトレーニング クリア！", 764, 46, FS.md, COL.yellow, "right");
+    if (this.todayCleared()) s.text("今日のトレーニング クリア！", 764, 46, FS.md, COL.yellow, "right");
     else s.text("各方向3回でクリア", 764, 52, FS.sm, "#999", "right");
     this.normaChips(80);
     s.text("※左・右は、反対の肩を下げながら舌を出したときに数えます", 36, 146, 15, "#AAA");
     // トレーニング開始
-    s.button(20, 184, 370, 108, "トレーニング開始", () => { this.placementMode = "play"; this.setScene("PLACEMENT"); },
-      { bg: COL.green, size: FS.lg, sub: "エリーゼのために（約2分）", subColor: "#0B3D1F" });
-    const rec = this.getRecord();
-    s.text(`ハイスコア: ${rec.high}　／　前回: ${rec.last}`, 24, 302, FS.sm, COL.white);
+    s.button(20, 184, 370, 108, "トレーニング開始", () => { this.rankView = false; this.setScene("SONG_SELECT"); },
+      { bg: COL.green, size: FS.lg, sub: "曲を選ぶ（1曲 約2分）", subColor: "#0B3D1F" });
+    s.text("PC とスマホで遊んだ分は合計して数えます", 24, 302, FS.sm, COL.white);
     s.text("スマホは横向きでスタンドに立て、", 24, 326, 15, "#888");
     s.text("顔と両肩が映るように置いてください", 24, 346, 15, "#888");
     this.drawCalendar(410, 184, 370, 214);
@@ -1308,10 +1399,12 @@ class App {
     s.text("●クリア △遊んだ", x + w - 12, y + 8, 14, "#AAA", "right");
     const today = localDate();
     const cw = 50, ch = 34, gx = x + 10, gy = y + 34;
+    const hist = this.sync.historyMap();
     for (let i = 0; i < 31; i++) {
       const ds = addDays(start, i), r = Math.floor(i / 7), c = i % 7;
       const cx = gx + c * cw, cy = gy + r * ch;
-      const rec = this.daily[ds];
+      const loc = this.daily[ds] || {}, srv = hist[ds] || {};
+      const rec = { cleared: loc.cleared || srv.cleared || (ds === today && this.todayCleared()), plays: (loc.plays || 0) + (srv.plays || 0) };
       if (ds === today) s.rrect(cx + 1, cy + 1, cw - 4, ch - 4, 5, null, COL.teal, 2);
       s.text(ds.slice(5).replace(/^0/, "").replace("-", "/"), cx + 4, cy + 4, 11, ds > today ? "#555" : "#AAA");
       if (rec && rec.cleared) s.text("●", cx + cw - 22, cy + 13, 16, COL.green);
@@ -1325,22 +1418,23 @@ class App {
   draw_RESULT() {
     const s = this.scr, rec = this.getRecord();
     s.textC("CLEAR!", 18, FS.xl, COL.red);
-    s.textC(`PLAYER: ${this.user.id}  |  ${SONG_MAIN.title} [${SONG_MAIN.diff}]`, 78, FS.md, COL.teal);
+    s.textC(`PLAYER: ${this.user.id}  |  ${this.song.title} [${this.song.diff}]`, 78, FS.md, COL.teal);
     s.textC(`今回のスコア: ${this.score}`, 112, FS.lg, COL.white);
     s.textC(`ハイスコア: ${rec.high}   (前回のスコア: ${this.prevScore})`, 154, FS.md, rgb(200, 200, 200));
     if (this.isNewRecord) s.textC("NEW RECORD! 自己ベスト更新！", 188, FS.md, COL.yellow);
     s.text("今日のノルマ", 36, 222, FS.sm, "#BBB");
     this.normaChips(244, 46, true);
-    const d = this.daily[localDate()] || {};
+    const d = this.todayCounts();
     if (this.justCleared) s.textC("今日のトレーニング クリア！", 300, FS.lg, COL.yellow);
-    else if (d.cleared) s.textC("今日のトレーニングはクリア済みです", 304, FS.md, COL.green);
+    else if (this.todayCleared()) s.textC("今日のトレーニングはクリア済みです", 304, FS.md, COL.green);
     else {
       const rest = NORMA_ORDER.filter((k) => (d[k] || 0) < NORMA_GOAL).map((k) => `${DIR_JA[k]} ${NORMA_GOAL - (d[k] || 0)}回`);
       s.textC(`クリアまで あと：${rest.join("、")}`, 306, FS.md, COL.white);
     }
     const gains = NORMA_ORDER.filter((k) => this.normaThisPlay[k] > 0).map((k) => `${DIR_JA[k]} +${this.normaThisPlay[k]}`);
     s.textC(gains.length ? `このプレイで：${gains.join("、")}` : "このプレイで増えたノルマはありません", 346, FS.sm, "#AAA");
-    s.button(W / 2 - 120, 384, 240, 56, "ホームへ", () => this.setScene("HOME"), { bg: COL.yellow });
+    s.button(W / 2 - 250, 384, 240, 56, "曲選択へ", () => this.setScene("SONG_SELECT"), { bg: COL.teal });
+    s.button(W / 2 + 10, 384, 240, 56, "ホームへ", () => this.setScene("HOME"), { bg: COL.yellow });
   }
 
   // =====================================================
@@ -1397,7 +1491,7 @@ class App {
     const toCsv = (cols, rows) => "﻿" + [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\r\n") + "\r\n";
     const dCols = ["user_id", "date", "up", "down", "left", "right", "front", "cleared", "cleared_at", "plays", "completed_plays"];
     const dRows = Object.keys(this.daily).sort().map((date) => ({ user_id: id, date, ...this.daily[date] }));
-    const pCols = ["user_id", "play_id", "started_at", "ended_at", "completed", "song", "score", "excellent", "nice", "perfect", "miss", "max_count",
+    const pCols = ["user_id", "play_id", "started_at", "ended_at", "completed", "song", "difficulty", "device", "score", "excellent", "nice", "perfect", "miss", "max_count",
       "norma_up", "norma_down", "norma_left", "norma_right", "norma_front", "hold_sec_up", "hold_sec_down", "hold_sec_left", "hold_sec_right", "hold_sec_front",
       "shoulder_hits", "face_warning_ratio", "shoulder_missing_ratio", "avg_fps", "offset", "speed", "user_agent", "app_version", "model_version"];
     const cCols = ["user_id", "at", "kind", "test_correct", "missed_dirs", "model_version"];

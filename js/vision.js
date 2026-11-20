@@ -503,9 +503,9 @@ export function decideDirection(avgProbs, classes, raw, userCalib, stab, nowSec)
     power = axisPower(bestDir);
   }
   power = Math.max(0.0, power);
-  let req = bestDir === "front" ? 0.25 : 0.35;
-  if (bestDir === stab.cur) req *= 0.7;
-  const cand = (bestDir !== "face" && power >= req) ? bestDir : "none";
+  // PC版 1119_1：パワーの足切りをなくした（方向は AI の判定とスタビライザだけで決める）
+  //   パワーは MAX 判定（isFullPower）にだけ使う
+  const cand = bestDir !== "face" ? bestDir : "none";
   const dir = stab.update(cand, highest, nowSec);
   return { dir, ratio: highest, power, isFullPower: dir !== "none" && power >= 1.0 };
 }
