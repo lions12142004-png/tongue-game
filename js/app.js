@@ -11,7 +11,7 @@ import { AudioEngine } from "./audio.js";
 import { Sync } from "./sync.js";
 import { SYNC } from "./config.js";
 
-export const APP_VERSION = "1.3.3";
+export const APP_VERSION = "1.4.0";
 const MODEL_VERSION = "html2-rfsvm";     // 学習方法を変えたら上げる（保存してある特徴量から自動で学習し直す）
 const FEAT_VERSIONS = ["feat21-v1", "html1-feat21"];   // 特徴量の版（変えたら先頭に足す。古い特徴量は読まずに測り直しへ）
 const MOCK = new URLSearchParams(location.search).has("mock");
@@ -58,6 +58,8 @@ function timingStats(a) {
   const med = n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
   return { timing_mean_ms: Math.round(a.reduce((x, y) => x + y, 0) / n), timing_median_ms: Math.round(med), timing_n: n };
 }
+// 追加(1.4.0): ランキングのユーザー名に使える文字（受け口・PC版と同じ）
+const NAME_RE = /^[A-Za-z0-9_\-぀-ゟ゠-ヿ㐀-䶿一-鿿々〆０-９Ａ-Ｚａ-ｚ]{1,8}$/;
 const WAKE_SCENES = new Set(["PLACEMENT", "CALIB_INTRO", "CALIBRATION", "CALIB_CONFIRM", "TUTORIAL_INTRO", "TRAINING",
   "PLAYING", "PAUSE", "PAUSE_RULE", "PAUSE_CONFIRM", "RESUME_COUNTDOWN", "CHECK_DETECTION"]);
 
@@ -90,7 +92,7 @@ class App {
     this.wrap = document.getElementById("wrap");
     this.video = document.getElementById("cam");
     this.scr = new Screen(this.cv, this.wrap);
-    this.scr.onResize = () => this.placeIdForm();
+    this.scr.onResize = () => { this.placeIdForm(); this.placeNameForm(); };
     this.audio = new AudioEngine();
     this.engine = MOCK ? new MockEngine() : new VisionEngine();
     this.engine.onFrame(() => this.onVisionFrame());
@@ -169,6 +171,21 @@ class App {
     this.idForm = document.getElementById("idform");
     this.idInput = document.getElementById("idinput");
     this.idForm.addEventListener("submit", (e) => { e.preventDefault(); this.submitId(); });
+    // 追加(1.4.0): ランキングのユーザー名の入力欄
+    this.nameForm = document.getElementById("nameform");
+    this.nameInput = document.getElementById("nameinput");
+    this.nameForm.addEventListener("submit", (e) => { e.preventDefault(); this.chooseRanking(true); });
+  }
+  placeNameForm() {
+    if (!this.nameForm) return;
+    const r = this.cv.getBoundingClientRect(), s = this.scr.scale;
+    Object.assign(this.nameForm.style, { left: (r.left + 260 * s) + "px", top: (r.top + 222 * s) + "px", width: (280 * s) + "px", fontSize: Math.max(14, 24 * s) + "px" });
+  }
+  showNameForm(show, value = "") {
+    if (!this.nameForm) return;
+    this.nameForm.style.display = show ? "flex" : "none";
+    if (show) { this.placeNameForm(); this.nameInput.value = value; }
+    else this.nameInput.blur();
   }
   placeIdForm() {
     if (!this.idForm) return;
@@ -292,6 +309,7 @@ class App {
   // =====================================================
   setScene(s) {
     this.scene = s;
+    if (s !== "RANKING_ASK") this.showNameForm(false);
     this.sync.setBusy(SYNC_QUIET_SCENES.has(s));   // 追加(1.3.1): プレイ中・測定中は通信しない
     this.engine.calibrating = (s === "CALIBRATION" || s === "CALIB_CONFIRM" || s === "CALIB_INTRO");
     this.engine.wantMask = (s === "SETTINGS" || s === "DEV");
@@ -408,6 +426,39 @@ class App {
     s.textC("参加者IDを入力", 40, FS.lg, COL.teal);
     s.textC(this.loginMsg || "", 90, FS.sm, this.loginMsgCol || "#B4B4B4");
     s.textC("（研究の担当者から伝えられたIDです。PC版と同じIDを使ってください）", 200, FS.sm, "#888", 700);
+  }
+
+  // =====================================================
+  // 追加(1.4.0): 得点ランキングへの参加（まだ選んでいなければ曲選択の前に。あとから設定で変えられる）
+  // =====================================================
+  goRankAsk(from) {
+    const p = this.sync.myProfile();
+    this.rankAskFrom = from; this.rankMsg = ""; this.rankMsgCol = "#B4B4B4";
+    this.setScene("RANKING_ASK");
+    this.showNameForm(true, p ? p.name : "");
+  }
+  chooseRanking(on) {
+    const name = this.nameInput.value.trim();
+    if (on && !NAME_RE.test(name)) {
+      this.rankMsg = name ? "ユーザー名は、ひらがな・カタカナ・漢字・英数字と _ - で8文字までにしてください" : "参加する場合は、ユーザー名を入れてください";
+      this.rankMsgCol = COL.red; return;
+    }
+    this.sync.setProfile(on, name);
+    this.showNameForm(false);
+    this.setScene(this.rankAskFrom === "settings" ? "SETTINGS" : "SONG_SELECT");
+  }
+  draw_RANKING_ASK() {
+    const s = this.scr;
+    s.textC("得点ランキングへの参加", 18, FS.lg, COL.teal);
+    s.textC("曲・難易度ごとの得点の上位3名が、ユーザー名と得点で、ほかの参加者の画面に表示されます。", 76, FS.sm, COL.white, 740);
+    s.textC("参加は自由です。参加しなくても、ご自身の得点は記録されます。", 104, FS.sm, COL.white, 740);
+    s.textC("あとから「設定」で、いつでも変えられます（PC版とスマホ版で共通です）。", 132, FS.sm, COL.white, 740);
+    s.textC("参加する場合のユーザー名", 188, FS.sm + 2, COL.yellow);
+    s.textC("ひらがな・カタカナ・漢字・英数字と _ - で8文字まで。本名・あだ名・学籍番号など、ご本人と分かる名前は使わないでください", 280, 14, "#AAA", 780);
+    if (this.rankMsg) s.textC(this.rankMsg, 306, FS.sm, this.rankMsgCol);
+    s.button(160, 340, 220, 62, "参加する", () => this.chooseRanking(true), { bg: COL.teal });
+    s.button(420, 340, 220, 62, "参加しない", () => this.chooseRanking(false), { bg: rgb(90, 90, 90), fg: COL.white });
+    if (this.rankAskFrom === "settings") s.button(20, 420, 140, 46, "やめる", () => this.setScene("SETTINGS"), { bg: rgb(60, 60, 60), fg: COL.white, size: FS.sm });
   }
 
   // =====================================================
@@ -1173,6 +1224,7 @@ class App {
   draw_SONG_SELECT() {
     const s = this.scr;
     this.sync.refresh();
+    if (this.sync.needsChoice()) { this.goRankAsk("first"); return; }   // 追加(1.4.0): ランキングへの参加をまだ選んでいなければ、先に聞く
     s.text(`PLAYER: ${this.user ? this.user.id : ""}`, 20, 10, FS.sm, COL.yellow);
     s.textC("曲を選ぶ", 8, FS.lg, COL.teal, 300);
     const st = this.sync.statusText();
@@ -1222,7 +1274,7 @@ class App {
         else for (let k = 0; k < 3; k++) {
           const yy = ry + 2 + k * 26, e = top[k];
           if (!e) { s.text(`${k + 1}位  —`, px + 150, yy, 16, "#555"); continue; }
-          const me = this.user && e.name === this.user.id;
+          const mp = this.sync.myProfile(), me = this.user && (e.name === this.user.id || (mp && mp.ranking && e.name === mp.name));
           s.text(`${e.rank}位  ${e.name}`, px + 150, yy, 16, me ? COL.yellow : COL.white, "left", 190);
           s.text(Number(e.score).toLocaleString(), px + pw - 24, yy, 16, me ? COL.yellow : COL.white, "right");
         }
@@ -1495,6 +1547,13 @@ class App {
     s.circle(sl.x + sl.w * ratio, sl.y + 5, 11, this.activeSlider === sl ? COL.white : rgb(200, 200, 200));
     s.text(String(cfg.exposure_offset), 540, 314, FS.md, COL.yellow);
     s.text("通常は50のまま。舌を出しても右の白い塊がほとんど出ないときだけ左へ", 30, 350, 14, "#AAA", "left", 520);
+    // 追加(1.4.0): 得点ランキングへの参加
+    if (this.sync.enabled) {
+      const p = this.sync.myProfile();
+      const t = !p ? "ランキング：（読み込み中）" : !p.chosen ? "ランキング：まだ選んでいません" : p.ranking ? `ランキング：参加中（${p.name}）` : "ランキング：参加していません";
+      s.text(t, 120, 381, FS.sm, COL.white, "left", 205);   // 左下はカメラの小窓があるので 120 から
+      s.button(330, 372, 196, 38, "変更する", () => this.goRankAsk("settings"), { bg: rgb(100, 100, 100), fg: COL.white, size: FS.sm, disabled: !p });
+    }
     // プレビュー
     const px = 590, pw = 192, ph = 144;
     if (MOCK) s.rect(px, 50, pw, ph, "#334"); else s.video(this.video, px, 50, pw, ph);

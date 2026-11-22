@@ -25,10 +25,11 @@ export class Sync {
     this.todayStr = todayFn; this.nowStr = nowFn;
     this.uid = ""; this.queue = []; this.recent = [];
     this.today = null; this.history = null; this.ranking = null;
+    this.profile = null;   // ランキングへの参加（サーバーの値）：{chosen, ranking, display_name, at}
     this.online = null; this.lastError = "";
     this.flushing = false; this.lastFlush = 0;
     this.busy = false;   // true の間（プレイ中・測定中）は通信しない
-    this.lastTodayReq = 0; this.lastRankReq = 0; this.lastHistReq = 0;
+    this.lastTodayReq = 0; this.lastRankReq = 0; this.lastHistReq = 0; this.lastProfReq = 0;
     if (this.enabled) {
       setInterval(() => this.tick(), 30000);
       window.addEventListener("online", () => { this.online = null; this.flush(); this.refresh(true); });
@@ -41,7 +42,8 @@ export class Sync {
     this.today = await dbGet("todaycache:" + uid);
     this.history = await dbGet("historycache:" + uid);
     this.ranking = await dbGet("rankingcache");
-    this.recent = [];
+    this.profile = await dbGet("profilecache:" + uid);
+    this.recent = []; this.profileFresh = false;
     this.refresh(true);
     this.flush();
   }
@@ -57,6 +59,27 @@ export class Sync {
   addNorma(dir, date) { return this.add({ type: "norma", user_id: this.uid, date: date || this.todayStr(), dir, counted_at: this.nowStr() }); }
   addPlay(row) { return this.add({ ...row, type: "play" }); }
   addCalib(row) { return this.add({ ...row, type: "calib" }); }
+  // ランキングへの参加・不参加とユーザー名（PC版とスマホ版のどちらで選んでも、新しいほうが残る）
+  setProfile(on, name) {
+    return this.add({ type: "profile", user_id: this.uid, ranking: on ? 1 : 0, display_name: name || "", at: this.nowStr() });
+  }
+  // 今の選択：送信待ちの選択があればそれ、なければサーバーの値。{chosen, ranking, name} か、分からなければ null
+  myProfile() {
+    const q = this.queue.filter((ev) => ev.type === "profile" && ev.user_id === this.uid);
+    const sv = this.profile && this.profile.user_id === this.uid ? this.profile : null;
+    if (q.length) {
+      const e = q[q.length - 1];
+      return { chosen: true, ranking: Number(e.ranking) === 1, name: e.display_name || (sv ? sv.display_name : "") };
+    }
+    if (!sv) return null;
+    return { chosen: !!Number(sv.chosen), ranking: !!Number(sv.ranking), name: sv.display_name || "" };
+  }
+  // まだ選んでいない（サーバーで確かめられたときだけ true。通信できないときは聞かない）
+  needsChoice() {
+    if (!this.enabled || !this.uid) return false;
+    const p = this.myProfile();
+    return !!(p && !p.chosen && this.profileFresh);
+  }
 
   // ---------- 画面に出す値 ----------
   // 今日の合計 = サーバーの値 ＋ まだ反映されていない自分の分。通信を使わない設定なら localCounts をそのまま返す
@@ -136,7 +159,10 @@ export class Sync {
       this.recent = this.recent.filter(([, t]) => now - t < 600000);
       await dbSet("queue:" + this.uid, this.queue).catch(() => {});
       if (acc.size) { this.fetchToday(); this.fetchHistory(); }
-      if (batch.some((ev) => ev.type === "play" && acc.has(ev.event_id))) this.fetchRanking();
+      if (batch.some((ev) => (ev.type === "play" || ev.type === "profile") && acc.has(ev.event_id))) this.fetchRanking();
+      if (batch.some((ev) => ev.type === "profile" && acc.has(ev.event_id))) this.fetchProfile();
+      const badName = (res.rejected || []).find((r) => r.error === "name");
+      if (badName) this.lastError = "name";
       if (this.queue.length) setTimeout(() => this.flush(), 500);
     } catch { /* 通信できない：あとで送り直す */ }
     finally { this.flushing = false; }
@@ -158,6 +184,14 @@ export class Sync {
       if (r.ok && uid === this.uid) { this.history = { ...r, user_id: uid }; dbSet("historycache:" + uid, this.history).catch(() => {}); }
     } catch {}
   }
+  async fetchProfile() {
+    if (!this.enabled || this.busy || !this.uid) return;
+    const uid = this.uid;
+    try {
+      const r = await this.req("GET", { action: "profile", key: this.key, user_id: uid });
+      if (r.ok && uid === this.uid) { this.profile = { ...r, user_id: uid }; this.profileFresh = true; dbSet("profilecache:" + uid, this.profile).catch(() => {}); }
+    } catch {}
+  }
   async fetchRanking() {
     if (!this.enabled || this.busy) return;
     try {
@@ -172,6 +206,7 @@ export class Sync {
     if (force || now - this.lastTodayReq > 20000) { this.lastTodayReq = now; this.fetchToday(); }
     if (force || now - this.lastRankReq > 20000) { this.lastRankReq = now; this.fetchRanking(); }
     if (force || now - this.lastHistReq > 60000) { this.lastHistReq = now; this.fetchHistory(); }
+    if (force || now - this.lastProfReq > 60000) { this.lastProfReq = now; this.fetchProfile(); }
   }
   tick() { this.flush(); }
 }
