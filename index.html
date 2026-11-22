@@ -27,7 +27,7 @@
 <script type="module" src="js/app.js"></script>
 <script>
   if ("serviceWorker" in navigator && !/[?&]mock/.test(location.search)) {
-    window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+    window.addEventListener("load", () => navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => {}));
   }
 </script>
 </body>

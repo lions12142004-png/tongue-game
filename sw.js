@@ -1,6 +1,6 @@
 // オフラインでも遊べるように、素材とモデルをキャッシュする
 //   ファイルを更新したら VERSION を上げる（古いキャッシュは自動で消える）
-const VERSION = "tongue-game-1.3.2";
+const VERSION = "tongue-game-1.3.3";
 const CORE = [
   "./", "index.html", "css/style.css", "manifest.webmanifest",
   "js/app.js", "js/ui.js", "js/vision.js", "js/rf.js", "js/svm.js", "js/model.js", "js/sync.js", "js/config.js", "js/train-worker.js", "js/storage.js", "js/audio.js", "js/mock.js",
@@ -14,7 +14,7 @@ const CORE = [
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(CORE.map((u) => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", (e) => {
   e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
@@ -29,7 +29,8 @@ self.addEventListener("fetch", (e) => {
   // HTML・JS・JSON は「通信できればネット、だめならキャッシュ」（更新がすぐ反映される）
   const fresh = sameOrigin && (req.mode === "navigate" || /\.(html|js|css|json|webmanifest)$/.test(url.pathname) || url.pathname.endsWith("/"));
   if (fresh) {
-    e.respondWith(fetch(req).then((res) => {
+    // 修正(1.3.3): ブラウザの一時保存（GitHub Pages は10分）を使わず、毎回サーバーに新しい版があるか確かめる
+    e.respondWith(fetch(req, { cache: "no-cache" }).then((res) => {
       if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req, { ignoreSearch: true })));

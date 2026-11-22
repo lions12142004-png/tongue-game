@@ -11,7 +11,7 @@ import { AudioEngine } from "./audio.js";
 import { Sync } from "./sync.js";
 import { SYNC } from "./config.js";
 
-export const APP_VERSION = "1.3.1";
+export const APP_VERSION = "1.3.3";
 const MODEL_VERSION = "html2-rfsvm";     // 学習方法を変えたら上げる（保存してある特徴量から自動で学習し直す）
 const FEAT_VERSIONS = ["feat21-v1", "html1-feat21"];   // 特徴量の版（変えたら先頭に足す。古い特徴量は読まずに測り直しへ）
 const MOCK = new URLSearchParams(location.search).has("mock");
@@ -51,6 +51,13 @@ const NORMA_GOAL = 3;
 const FACE_W_MIN = 120;
 // 追加(1.3.1): この画面の間は通信しない（ためておき、ほかの画面に戻ったらまとめて送る）
 const SYNC_QUIET_SCENES = new Set(["LOADING", "PLAYING", "RESUME_COUNTDOWN", "PAUSE", "PAUSE_RULE", "PAUSE_CONFIRM", "CALIBRATION", "CHECK_DETECTION"]);
+// 追加(1.3.2): ノーツを取ったときのずれ（ms、＋＝ノーツが判定線に来る前＝早い）の平均と中央値
+function timingStats(a) {
+  if (!a || !a.length) return { timing_mean_ms: "", timing_median_ms: "", timing_n: 0 };
+  const s = [...a].sort((x, y) => x - y), n = s.length;
+  const med = n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+  return { timing_mean_ms: Math.round(a.reduce((x, y) => x + y, 0) / n), timing_median_ms: Math.round(med), timing_n: n };
+}
 const WAKE_SCENES = new Set(["PLACEMENT", "CALIB_INTRO", "CALIBRATION", "CALIB_CONFIRM", "TUTORIAL_INTRO", "TRAINING",
   "PLAYING", "PAUSE", "PAUSE_RULE", "PAUSE_CONFIRM", "RESUME_COUNTDOWN", "CHECK_DETECTION"]);
 
@@ -829,7 +836,8 @@ class App {
       shoulder_hits: 0, face_warning_ratio: 0, shoulder_missing_ratio: 0, avg_fps: 0,
       offset: this.config.offset, speed: this.config.speed_mult,
       user_agent: navigator.userAgent, app_version: APP_VERSION, model_version: this.modelVersionStr(),
-      _frames: 0, _warn: 0, _shMiss: 0, _activeMs: 0,
+      timing_mean_ms: "", timing_median_ms: "", timing_n: 0,
+      _frames: 0, _warn: 0, _shMiss: 0, _activeMs: 0, _td: [],
     };
     this.plays.push(this.play);
     this.saveLogs();
@@ -844,6 +852,9 @@ class App {
     const sec = Math.max(0.001, p._activeMs / 1000);
     p.avg_fps = +(p._frames / sec).toFixed(1);
     for (const d of NORMA_ORDER) p["hold_sec_" + d] = +p["hold_sec_" + d].toFixed(2);
+    Object.assign(p, timingStats(p._td));
+    delete p._td;
+    this.lastTiming = p.timing_n ? { mean: p.timing_mean_ms, n: p.timing_n } : null;
     if (completed) this.todayRec().completed_plays++;
     const row = {}; for (const [k, v] of Object.entries(p)) if (!k.startsWith("_")) row[k] = v;
     this.sync.addPlay(row);   // 記録を送る（通信できなければ、あとで送り直す）
@@ -1065,6 +1076,7 @@ class App {
         if (!note.isHolding) {
           if (td > -400 && td < 200 && ok) {
             note.isHolding = true; note.earned = 0; note.missMs = 0;
+            if (this.play) this.play._td.push(td);   // 追加(1.3.2): 取ったときのずれ（＋＝早い）
             this.feedback.x = p3d(li, 1.0)[0]; setFb("Hold", 10); this.audio.playSE();
           } else if (td <= -400) {
             note.active = false; this.missCount++; this.combo = 0; setFb("MISS", 30);
@@ -1107,6 +1119,7 @@ class App {
           if (ok) {
             note.active = false; this.combo++;
             this.feedback.x = p3d(li, 1.0)[0]; this.audio.playSE();
+            if (this.play) this.play._td.push(td);   // 追加(1.3.2): 取ったときのずれ（＋＝早い）
             if (Math.abs(td) <= 100) {
               this.score += st.isFullPower ? maxP : maxP * 0.8;
               setFb(st.isFullPower ? "Excellent!! (MAX)" : "Excellent!!!", 30);
@@ -1438,7 +1451,11 @@ class App {
       s.textC(`クリアまで あと：${rest.join("、")}`, 306, FS.md, COL.white);
     }
     const gains = NORMA_ORDER.filter((k) => this.normaThisPlay[k] > 0).map((k) => `${DIR_JA[k]} +${this.normaThisPlay[k]}`);
-    s.textC(gains.length ? `このプレイで：${gains.join("、")}` : "このプレイで増えたノルマはありません", 346, FS.sm, "#AAA");
+    s.textC(gains.length ? `このプレイで：${gains.join("、")}` : "このプレイで増えたノルマはありません", 340, FS.sm, "#AAA");
+    if (this.lastTiming) {   // 追加(1.3.2): 取ったときのずれの平均
+      const m = this.lastTiming.mean;
+      s.text(`タイミング：平均 ${m > 0 ? "+" : ""}${m}ms（${m > 0 ? "早め" : m < 0 ? "遅め" : "ぴったり"}・${this.lastTiming.n}回）`, W - 12, H - 20, 13, "#888", "right");
+    }
     s.button(W / 2 - 250, 384, 240, 56, "曲選択へ", () => this.setScene("SONG_SELECT"), { bg: COL.teal });
     s.button(W / 2 + 10, 384, 240, 56, "ホームへ", () => this.setScene("HOME"), { bg: COL.yellow });
   }
@@ -1499,7 +1516,7 @@ class App {
     const dRows = Object.keys(this.daily).sort().map((date) => ({ user_id: id, date, ...this.daily[date] }));
     const pCols = ["user_id", "play_id", "started_at", "ended_at", "completed", "song", "difficulty", "device", "score", "excellent", "nice", "perfect", "miss", "max_count",
       "norma_up", "norma_down", "norma_left", "norma_right", "norma_front", "hold_sec_up", "hold_sec_down", "hold_sec_left", "hold_sec_right", "hold_sec_front",
-      "shoulder_hits", "face_warning_ratio", "shoulder_missing_ratio", "avg_fps", "offset", "speed", "user_agent", "app_version", "model_version"];
+      "shoulder_hits", "face_warning_ratio", "shoulder_missing_ratio", "avg_fps", "offset", "speed", "user_agent", "app_version", "model_version", "timing_mean_ms", "timing_median_ms", "timing_n"];
     const cCols = ["user_id", "at", "kind", "test_correct", "missed_dirs", "model_version"];
     const cRows = this.calibLog.map((r) => ({ user_id: id, ...r }));
     const files = [
